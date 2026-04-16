@@ -44,8 +44,13 @@ def transcribe(path: Path) -> str:
 
 
 def _describe_sync(image_path: Path) -> str:
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
+    from PIL import Image
+    import io
+    img = Image.open(image_path)
+    img.thumbnail((512, 512))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    img_b64 = base64.b64encode(buf.getvalue()).decode()
     resp = ollama_client.generate(
         model=VISION_MODEL,
         prompt=VISION_PROMPT,
