@@ -1,0 +1,167 @@
+import os
+import logging
+from datetime import datetime
+from pathlib import Path
+
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+NOTES_DIR = Path(os.getenv("NOTES_DIR", "/home/ann/Obsidian/Входящие"))
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "300"))  # seconds
+
+CLOSE_WORDS = {
+    "все", "всё", "закончил", "закончила", "закончить", "закрыть", "закрой",
+    "конец", "стоп", "хватит", "достаточно", "готово", "end", "stop", "done", "finish",
+}
+
+# user_id -> {"path": Path, "file": TextIO}
+sessions: dict[int, dict] = {}
+
+# message_id -> Path  (persists across restarts via MAP_FILE)
+msg_map: dict[int, Path] = {}
+
+MAP_FILE = NOTES_DIR / ".msg_map"
+
+
+def load_map():
+    if MAP_FILE.exists():
+        for line in MAP_FILE.read_text(encoding="utf-8").splitlines():
+            parts = line.split("|", 1)
+            if len(parts) == 2:
+                try:
+                    msg_map[int(parts[0])] = Path(parts[1])
+                except ValueError:
+                    pass
+
+
+def append_map(msg_id: int, path: Path):
+    msg_map[msg_id] = path
+    with open(MAP_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{msg_id}|{path}\n")
+
+
+def is_close(text: str) -> bool:
+    return text.lower().strip().rstrip("!.,…") in CLOSE_WORDS
+
+
+def new_filepath() -> Path:
+    ts = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+    return NOTES_DIR / f"{ts}.md"
+
+
+def open_session(user_id: int) -> dict:
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    path = new_filepath()
+    f = open(path, "a", encoding="utf-8")
+    f.write(f"# {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+    f.flush()
+    session = {"path": path, "file": f}
+    sessions[user_id] = session
+    log.info("Opened %s", path)
+    return session
+
+
+def close_session(user_id: int, context: ContextTypes.DEFAULT_TYPE | None = None):
+    session = sessions.pop(user_id, None)
+    if not session:
+        return
+    session["file"].close()
+    log.info("Closed %s", session["path"])
+    if context:
+        _cancel_timeout(user_id, context)
+
+
+def _cancel_timeout(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    for job in context.job_queue.get_jobs_by_name(f"to_{user_id}"):
+        job.schedule_removal()
+
+
+def _schedule_timeout(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    _cancel_timeout(user_id, context)
+
+    async def _job(ctx: ContextTypes.DEFAULT_TYPE):
+        close_session(ctx.job.data)
+
+    context.job_queue.run_once(_job, SESSION_TIMEOUT, data=user_id, name=f"to_{user_id}")
+
+
+def format_content(message) -> str:
+    parts = []
+    text = message.text or message.caption or ""
+    if text:
+        parts.append(text)
+    if message.photo:
+        parts.append("📷 [фото]")
+    if message.document:
+        parts.append(f"📎 [{message.document.file_name or 'документ'}]")
+    if message.voice:
+        parts.append("🎤 [голосовое]")
+    if message.video:
+        parts.append("🎥 [видео]")
+    if message.sticker:
+        parts.append(f"[стикер: {message.sticker.emoji or ''}]")
+    if message.location:
+        loc = message.location
+        parts.append(f"📍 [{loc.latitude}, {loc.longitude}]")
+    return " ".join(parts) if parts else "[медиа]"
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    user_id = update.effective_user.id
+    if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
+        return
+
+    content = format_content(message)
+    if not content.strip():
+        return
+
+    # Reply to a known message → append to original file
+    if message.reply_to_message:
+        rid = message.reply_to_message.message_id
+        target = msg_map.get(rid)
+        if target and target.exists():
+            ts = datetime.now().strftime("%H:%M")
+            with open(target, "a", encoding="utf-8") as f:
+                f.write(f"\n> **[{ts}] Ответ:** {content}\n")
+            append_map(message.message_id, target)
+            return
+
+    # Close command
+    if is_close(content):
+        if user_id in sessions:
+            close_session(user_id, context)
+        return
+
+    # Get or create session
+    session = sessions.get(user_id) or open_session(user_id)
+    _schedule_timeout(user_id, context)
+
+    ts = datetime.now().strftime("%H:%M")
+    session["file"].write(f"[{ts}] {content}\n")
+    session["file"].flush()
+    append_map(message.message_id, session["path"])
+
+
+def main():
+    load_map()
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(
+        filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.ALL |
+        filters.VOICE | filters.VIDEO | filters.Sticker.ALL | filters.LOCATION,
+        handle_message,
+    ))
+    log.info("Secretary bot started. Notes dir: %s", NOTES_DIR)
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
