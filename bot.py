@@ -1,10 +1,34 @@
 import os
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
+import whisper
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+_whisper_model = None
+_whisper_lock = threading.Lock()
+
+def get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        with _whisper_lock:
+            if _whisper_model is None:
+                log.info("Loading Whisper model...")
+                _whisper_model = whisper.load_model(os.getenv("WHISPER_MODEL", "base"))
+                log.info("Whisper ready")
+    return _whisper_model
+
+
+def transcribe(path: Path) -> str:
+    try:
+        result = get_whisper().transcribe(str(path), language="ru")
+        return result["text"].strip()
+    except Exception as e:
+        log.warning("Transcription failed: %s", e)
+        return ""
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -115,7 +139,10 @@ async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     if message.voice:
         path = await download_file(context, message.voice.file_id, f"voice-{ts}.ogg")
+        text = transcribe(path)
         parts.append(f"![[{path.name}]]")
+        if text:
+            parts.append(f"🗣 {text}")
 
     if message.video:
         path = await download_file(context, message.video.file_id, f"video-{ts}.mp4")
