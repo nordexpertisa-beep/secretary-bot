@@ -14,7 +14,7 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 VISION_MODEL = os.getenv("VISION_MODEL", "moondream")
 VISION_PROMPT = (
-    "Describe what you see in one or two sentences in Russian. "
+    "Describe what you see in one or two sentences in English. "
     "Focus on the type of content (document, receipt, photo, QR code, diagram, etc.) "
     "and its main subject. Do not transcribe text."
 )
