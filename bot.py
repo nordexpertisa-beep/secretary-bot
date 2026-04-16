@@ -11,20 +11,17 @@ log = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 NOTES_DIR = Path(os.getenv("NOTES_DIR", "/home/ann/Obsidian/Входящие"))
+ATTACHMENTS_DIR = NOTES_DIR / "attachments"
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
-SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "300"))  # seconds
+SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "300"))
 
 CLOSE_WORDS = {
     "все", "всё", "закончил", "закончила", "закончить", "закрыть", "закрой",
     "конец", "стоп", "хватит", "достаточно", "готово", "end", "stop", "done", "finish",
 }
 
-# user_id -> {"path": Path, "file": TextIO}
 sessions: dict[int, dict] = {}
-
-# message_id -> Path  (persists across restarts via MAP_FILE)
 msg_map: dict[int, Path] = {}
-
 MAP_FILE = NOTES_DIR / ".msg_map"
 
 
@@ -56,6 +53,7 @@ def new_filepath() -> Path:
 
 def open_session(user_id: int) -> dict:
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
     path = new_filepath()
     f = open(path, "a", encoding="utf-8")
     f.write(f"# {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
@@ -90,25 +88,57 @@ def _schedule_timeout(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     context.job_queue.run_once(_job, SESSION_TIMEOUT, data=user_id, name=f"to_{user_id}")
 
 
-def format_content(message) -> str:
+async def download_file(context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str) -> Path:
+    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ATTACHMENTS_DIR / filename
+    # avoid overwrite
+    if dest.exists():
+        stem, suffix = dest.stem, dest.suffix
+        dest = ATTACHMENTS_DIR / f"{stem}_{int(datetime.now().timestamp())}{suffix}"
+    tg_file = await context.bot.get_file(file_id)
+    await tg_file.download_to_drive(dest)
+    return dest
+
+
+async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
     parts = []
     text = message.text or message.caption or ""
     if text:
         parts.append(text)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
     if message.photo:
-        parts.append("📷 [фото]")
-    if message.document:
-        parts.append(f"📎 [{message.document.file_name or 'документ'}]")
+        photo = message.photo[-1]  # highest resolution
+        path = await download_file(context, photo.file_id, f"photo-{ts}.jpg")
+        parts.append(f"![[{path.name}]]")
+
     if message.voice:
-        parts.append("🎤 [голосовое]")
+        path = await download_file(context, message.voice.file_id, f"voice-{ts}.ogg")
+        parts.append(f"![[{path.name}]]")
+
     if message.video:
-        parts.append("🎥 [видео]")
+        path = await download_file(context, message.video.file_id, f"video-{ts}.mp4")
+        parts.append(f"![[{path.name}]]")
+
+    if message.document:
+        orig = message.document.file_name or f"file-{ts}"
+        path = await download_file(context, message.document.file_id, orig)
+        parts.append(f"![[{path.name}]]")
+
+    if message.audio:
+        orig = message.audio.file_name or f"audio-{ts}.mp3"
+        path = await download_file(context, message.audio.file_id, orig)
+        parts.append(f"![[{path.name}]]")
+
     if message.sticker:
         parts.append(f"[стикер: {message.sticker.emoji or ''}]")
+
     if message.location:
         loc = message.location
         parts.append(f"📍 [{loc.latitude}, {loc.longitude}]")
-    return " ".join(parts) if parts else "[медиа]"
+
+    return "\n".join(parts) if parts else "[медиа]"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,7 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
         return
 
-    content = format_content(message)
+    content = await build_content(message, context)
     if not content.strip():
         return
 
@@ -156,7 +186,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(
         filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.ALL |
-        filters.VOICE | filters.VIDEO | filters.Sticker.ALL | filters.LOCATION,
+        filters.VOICE | filters.VIDEO | filters.AUDIO | filters.Sticker.ALL | filters.LOCATION,
         handle_message,
     ))
     log.info("Secretary bot started. Notes dir: %s", NOTES_DIR)
