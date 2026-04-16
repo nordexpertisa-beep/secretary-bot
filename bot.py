@@ -1,10 +1,13 @@
 import asyncio
+import io
 import os
 import base64
 import logging
 import threading
 from datetime import datetime
 from pathlib import Path
+
+from PIL import Image
 
 import fitz  # pymupdf
 import whisper
@@ -44,8 +47,6 @@ def transcribe(path: Path) -> str:
 
 
 def _describe_sync(image_path: Path) -> str:
-    from PIL import Image
-    import io
     img = Image.open(image_path)
     img.thumbnail((512, 512))
     buf = io.BytesIO()
