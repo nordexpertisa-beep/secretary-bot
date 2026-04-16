@@ -1,15 +1,26 @@
 import os
+import base64
 import logging
 import threading
 from datetime import datetime
 from pathlib import Path
 
+import fitz  # pymupdf
 import whisper
+import ollama as ollama_client
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
+VISION_MODEL = os.getenv("VISION_MODEL", "moondream")
+VISION_PROMPT = (
+    "Describe what you see in one or two sentences in Russian. "
+    "Focus on the type of content (document, receipt, photo, QR code, diagram, etc.) "
+    "and its main subject. Do not transcribe text."
+)
+
 _whisper_model = None
 _whisper_lock = threading.Lock()
+
 
 def get_whisper():
     global _whisper_model
@@ -29,6 +40,35 @@ def transcribe(path: Path) -> str:
     except Exception as e:
         log.warning("Transcription failed: %s", e)
         return ""
+
+
+def describe_image(image_path: Path) -> str:
+    try:
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+        resp = ollama_client.generate(
+            model=VISION_MODEL,
+            prompt=VISION_PROMPT,
+            images=[img_b64],
+        )
+        return resp["response"].strip()
+    except Exception as e:
+        log.warning("Vision failed for %s: %s", image_path, e)
+        return ""
+
+
+def pdf_to_image(pdf_path: Path) -> Path | None:
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[0]
+        pix = page.get_pixmap(dpi=150)
+        img_path = pdf_path.with_suffix(".png")
+        pix.save(img_path)
+        doc.close()
+        return img_path
+    except Exception as e:
+        log.warning("PDF render failed: %s", e)
+        return None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -133,16 +173,19 @@ async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     if message.photo:
-        photo = message.photo[-1]  # highest resolution
+        photo = message.photo[-1]
         path = await download_file(context, photo.file_id, f"photo-{ts}.jpg")
+        desc = describe_image(path)
         parts.append(f"![[{path.name}]]")
+        if desc:
+            parts.append(f"👁 {desc}")
 
     if message.voice:
         path = await download_file(context, message.voice.file_id, f"voice-{ts}.ogg")
-        text = transcribe(path)
+        transcript = transcribe(path)
         parts.append(f"![[{path.name}]]")
-        if text:
-            parts.append(f"🗣 {text}")
+        if transcript:
+            parts.append(f"🗣 {transcript}")
 
     if message.video:
         path = await download_file(context, message.video.file_id, f"video-{ts}.mp4")
@@ -152,6 +195,18 @@ async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
         orig = message.document.file_name or f"file-{ts}"
         path = await download_file(context, message.document.file_id, orig)
         parts.append(f"![[{path.name}]]")
+        mime = message.document.mime_type or ""
+        if mime.startswith("image/"):
+            desc = describe_image(path)
+            if desc:
+                parts.append(f"👁 {desc}")
+        elif mime == "application/pdf":
+            img = pdf_to_image(path)
+            if img:
+                desc = describe_image(img)
+                img.unlink(missing_ok=True)
+                if desc:
+                    parts.append(f"👁 {desc}")
 
     if message.audio:
         orig = message.audio.file_name or f"audio-{ts}.mp3"
