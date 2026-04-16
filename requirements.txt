@@ -3,3 +3,4 @@ openai-whisper
 ollama
 pymupdf
 pillow
+pyzbar

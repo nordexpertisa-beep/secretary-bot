@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
+from pyzbar import pyzbar
 
 import fitz  # pymupdf
 import whisper
@@ -54,17 +55,53 @@ def _to_square(img: Image.Image, size: int = 512) -> Image.Image:
     return square
 
 
+def _has_cyrillic(text: str) -> bool:
+    return any('\u0400' <= c <= '\u04ff' for c in text)
+
+
+def _fallback_description(image_path: Path) -> str:
+    """Heuristic description when AI fails."""
+    try:
+        img = Image.open(image_path)
+        w, h = img.size
+
+        # QR / barcode check
+        codes = pyzbar.decode(img)
+        if codes:
+            types = list({c.type for c in codes})
+            return f"{', '.join(types)} code detected"
+
+        ratio = h / w
+        if ratio > 1.7:
+            return "Mobile screenshot (portrait)"
+        elif ratio < 0.6:
+            return "Landscape screenshot or photo"
+        else:
+            return "Image"
+    except Exception:
+        return "Image"
+
+
 def _describe_sync(image_path: Path) -> str:
     img = _to_square(Image.open(image_path))
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     img_b64 = base64.b64encode(buf.getvalue()).decode()
-    resp = ollama_client.generate(
-        model=VISION_MODEL,
-        prompt=VISION_PROMPT,
-        images=[img_b64],
-    )
-    return resp["response"].strip()
+    for attempt in range(2):
+        try:
+            resp = ollama_client.generate(
+                model=VISION_MODEL,
+                prompt=VISION_PROMPT,
+                images=[img_b64],
+            )
+            text = resp["response"].strip()
+            if text and not _has_cyrillic(text):
+                return text
+        except Exception as e:
+            log.warning("Vision attempt %d error: %s", attempt + 1, e)
+        log.warning("Vision attempt %d failed, retrying", attempt + 1)
+    # AI failed — use heuristic fallback
+    return _fallback_description(image_path)
 
 
 async def describe_image(image_path: Path) -> str:
