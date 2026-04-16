@@ -1,3 +1,4 @@
+import asyncio
 import os
 import base64
 import logging
@@ -42,16 +43,21 @@ def transcribe(path: Path) -> str:
         return ""
 
 
-def describe_image(image_path: Path) -> str:
+def _describe_sync(image_path: Path) -> str:
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    resp = ollama_client.generate(
+        model=VISION_MODEL,
+        prompt=VISION_PROMPT,
+        images=[img_b64],
+    )
+    return resp["response"].strip()
+
+
+async def describe_image(image_path: Path) -> str:
     try:
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-        resp = ollama_client.generate(
-            model=VISION_MODEL,
-            prompt=VISION_PROMPT,
-            images=[img_b64],
-        )
-        return resp["response"].strip()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _describe_sync, image_path)
     except Exception as e:
         log.warning("Vision failed for %s: %s", image_path, e)
         return ""
@@ -175,7 +181,7 @@ async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
     if message.photo:
         photo = message.photo[-1]
         path = await download_file(context, photo.file_id, f"photo-{ts}.jpg")
-        desc = describe_image(path)
+        desc = await describe_image(path)
         parts.append(f"![[{path.name}]]")
         if desc:
             parts.append(f"👁 {desc}")
@@ -197,7 +203,7 @@ async def build_content(message, context: ContextTypes.DEFAULT_TYPE) -> str:
         parts.append(f"![[{path.name}]]")
         mime = message.document.mime_type or ""
         if mime.startswith("image/"):
-            desc = describe_image(path)
+            desc = await describe_image(path)
             if desc:
                 parts.append(f"👁 {desc}")
         elif mime == "application/pdf":
