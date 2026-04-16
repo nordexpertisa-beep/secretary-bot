@@ -46,9 +46,16 @@ def transcribe(path: Path) -> str:
         return ""
 
 
+def _to_square(img: Image.Image, size: int = 512) -> Image.Image:
+    img = img.convert("RGB")
+    img.thumbnail((size, size))
+    square = Image.new("RGB", (size, size), (255, 255, 255))
+    square.paste(img, ((size - img.width) // 2, (size - img.height) // 2))
+    return square
+
+
 def _describe_sync(image_path: Path) -> str:
-    img = Image.open(image_path)
-    img.thumbnail((512, 512))
+    img = _to_square(Image.open(image_path))
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     img_b64 = base64.b64encode(buf.getvalue()).decode()
